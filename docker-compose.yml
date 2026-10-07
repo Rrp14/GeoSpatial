@@ -1,0 +1,125 @@
+name: geomeasure
+services:
+  postgres:
+    image: postgres:17.4-alpine
+    environment:
+      POSTGRES_DB: geo
+      POSTGRES_USER: geo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Create .env from .env.example}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U geo -d geo"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [internal]
+
+  minio:
+    build:
+      context: ./infra/minio
+      target: server
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-geo-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:9000/minio/health/live]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [internal]
+
+  minio-init:
+    build:
+      context: ./infra/minio
+      target: client
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-geo-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-geo-api}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY}
+    volumes:
+      - ./infra/minio:/init:ro
+    entrypoint: [/bin/sh, /init/init-buckets.sh]
+    networks: [internal]
+
+  clamav:
+    image: clamav/clamav:1.4
+    environment:
+      CLAMD_CONF_AlertExceedsMax: "yes"
+      CLAMD_CONF_AlertEncrypted: "yes"
+      CLAMD_CONF_MaxScanSize: "150M"
+      CLAMD_CONF_MaxFileSize: "100M"
+      CLAMD_CONF_StreamMaxLength: "30M"
+      CLAMD_CONF_MaxThreads: "2"
+      CLAMD_CONF_ConcurrentDatabaseReload: "no"
+    volumes:
+      - clamav_db:/var/lib/clamav
+    healthcheck:
+      test: [CMD, clamdcheck.sh]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 30
+    networks: [internal, outbound]
+
+  api:
+    build: ./backend
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://geo:${POSTGRES_PASSWORD}@postgres:5432/geo
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-geo-api}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      CLAMAV_HOST: clamav
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-25}
+      MAX_ARCHIVE_UNCOMPRESSED_MB: ${MAX_ARCHIVE_UNCOMPRESSED_MB:-100}
+      MAX_ARCHIVE_FILES: ${MAX_ARCHIVE_FILES:-100}
+      MAX_FEATURES: ${MAX_FEATURES:-50000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777,noexec,nosuid
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 2g
+    cpus: 2
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5173:80"
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:9001:9001"
+    networks: [internal, outbound]
+
+networks:
+  internal:
+    internal: true
+  outbound:
+volumes:
+  postgres_data:
+  minio_data:
+  clamav_db:
