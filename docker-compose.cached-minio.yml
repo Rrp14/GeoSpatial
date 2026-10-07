@@ -1,9 +1,0 @@
-# Local verification fallback when this exact official image is already cached.
-# A fresh deployment should use the main Compose file and pinned source builds.
-services:
-  minio:
-    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    pull_policy: never
-  minio-init:
-    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    pull_policy: never
